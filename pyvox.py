@@ -9,9 +9,9 @@ Exemplos:
     python pyvox.py texto.txt --narrador masculino
     python pyvox.py texto.txt --narrador feminino --speed 1.1 --play
 
-    # Escolher o backend de inferência (auto | torch | wyoming)
+    # Escolher o backend de inferência (auto | torch | onnx | wyoming)
+    python pyvox.py texto.txt --backend onnx --threads 8
     python pyvox.py texto.txt --backend wyoming
-    python pyvox.py texto.txt --backend torch --threads 8
 
     # Listar vozes disponíveis para o idioma
     python pyvox.py --list-voices --lang pt-br
@@ -114,18 +114,21 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                    help="velocidade da fala, 0.5 = metade, 1.5 = 1.5x (padrão: 1.0)")
     p.add_argument("-o", "--output", help="arquivo .wav de saída (padrão: <arquivo>.wav ou narração.wav)")
     p.add_argument("--threads", type=int, default=os.cpu_count(),
-                   help="número de threads da CPU (padrão: todos os núcleos)")
+                   help="número de threads da CPU (padrão: todos os núcleos) — backends torch e onnx")
     p.add_argument("--max-chars", type=int, default=None,
                    help="limitar a narração aos N primeiros caracteres (útil para testes)")
     p.add_argument("--play", action="store_true", help="tocar o áudio ao final (ffplay/mpv/aplay)")
     p.add_argument("--list-voices", action="store_true", help="listar vozes disponíveis e sair")
-    p.add_argument("--backend", default="auto", choices=["auto", "torch", "wyoming"],
-                   help="motor de inferência: auto (wyoming se disponível, senão torch; padrão), "
-                        "torch (in-process, CPU) ou wyoming (servidor wyoming-kokoro-torch)")
+    p.add_argument("--backend", default="auto", choices=["auto", "torch", "onnx", "wyoming"],
+                   help="motor de inferência: auto (o mais rápido disponível, na ordem "
+                        "onnx → wyoming → torch; padrão), onnx (kokoro-onnx/onnxruntime, CPU, "
+                        "mais rápido), torch (kokoro/PyTorch, CPU) ou wyoming (servidor "
+                        "wyoming-kokoro-torch)")
     p.add_argument("--device", default="cpu", choices=["cpu", "cuda", "mps"],
                    help="device do backend wyoming (padrão: cpu; o backend torch usa sempre CPU por enquanto)")
-    p.add_argument("--model-dir", help="diretório com o modelo Kokoro-82M (padrão: cache do Hugging Face) — backend wyoming")
-    p.add_argument("--data-dir", help="diretório local de vozes (padrão: ./data/kokoro) — backend wyoming")
+    p.add_argument("--model-dir", help="diretório com o modelo Kokoro-82M (padrão: cache do Hugging Face) — backend wyoming; "
+                                       "no onnx: arquivo .onnx ou diretório que o contenha (senão, baixa o padrão)")
+    p.add_argument("--data-dir", help="diretório local de vozes/modelo (padrão: ./data/kokoro) — backends wyoming e onnx")
     p.add_argument("--wyoming-port", type=int, default=None,
                    help="porta TCP do servidor Wyoming (padrão: porta livre automática)")
     return p.parse_args(argv)
@@ -273,6 +276,52 @@ def synthesize_wyoming(
     }
 
 
+def synthesize_onnx(
+    text: str, lang: str, voice: str, speed: float, output: str,
+    threads: int | None = None,
+    data_dir: str | None = None, model_dir: str | None = None,
+) -> dict:
+    """Gera o áudio via kokoro-onnx (onnxruntime, CPU) e grava em WAV."""
+    import numpy as np
+    import soundfile as sf
+    from onnx_backend import OnnxBackend
+
+    ob = OnnxBackend(
+        voice, lang=lang, speed=speed, threads=threads,
+        data_dir=data_dir or "data/kokoro", model_dir=model_dir,
+    )
+    print(f"preparando backend ONNX (voz={voice}, {lang}, cpu)…")
+    t0 = time.time()
+    with ob:
+        t_up = time.time() - t0
+        print(f"modelo ONNX pronto em {t_up:.1f}s")
+
+        t0 = time.time()
+        chunks = 0
+
+        def on_chunk(total_bytes: int) -> None:
+            nonlocal chunks
+            chunks += 1
+            secs = total_bytes / 2 / SAMPLE_RATE
+            print(f"\r[onnx] {secs:8.1f}s de áudio | {time.time() - t0:8.1f}s | "
+                  f"{chunks} chunks", end="", flush=True)
+
+        pcm, rate = ob.synthesize(text, voice=voice, on_chunk=on_chunk)
+    print()
+    sf.write(output, np.frombuffer(pcm, dtype=np.int16), rate, subtype="PCM_16")
+
+    audio_seconds = len(pcm) // 2 / rate
+    elapsed = time.time() - t0
+    return {
+        "output": output,
+        "audio_seconds": audio_seconds,
+        "chunks": chunks,
+        "elapsed": elapsed,
+        "rtf": (elapsed / audio_seconds) if audio_seconds else float("inf"),
+        "backend": "onnx",
+    }
+
+
 # --------------------------------------------------------------------------- #
 # Reprodução
 # --------------------------------------------------------------------------- #
@@ -329,6 +378,11 @@ def main(argv: list[str] | None = None) -> int:
         print("erro: o texto está vazio", file=sys.stderr)
         return 1
 
+    # Limite comum a todos os backends (kokoro e kokoro-onnx exigem 0.5..2.0)
+    if not 0.5 <= args.speed <= 2.0:
+        print("erro: --speed deve estar entre 0.5 e 2.0 (limite do Kokoro)", file=sys.stderr)
+        return 1
+
     output = args.output or f"{base}.wav"
 
     # Voz: --voice (exata) > --narrador (m/f) > padrão do idioma
@@ -346,14 +400,18 @@ def main(argv: list[str] | None = None) -> int:
     else:
         voice = DEFAULT_VOICES[lang_code]
 
-    # Resolve o backend (auto = wyoming se instalado, senão torch)
+    # Resolve o backend (auto = o mais rápido disponível: onnx → wyoming → torch)
     backend = args.backend
     if backend == "auto":
         try:
-            import wyoming_kokoro_torch  # noqa: F401
-            backend = "wyoming"
+            import kokoro_onnx  # noqa: F401
+            backend = "onnx"
         except ImportError:
-            backend = "torch"
+            try:
+                import wyoming_kokoro_torch  # noqa: F401
+                backend = "wyoming"
+            except ImportError:
+                backend = "torch"
 
     try:
         if backend == "wyoming":
@@ -362,6 +420,12 @@ def main(argv: list[str] | None = None) -> int:
                 default_voice=DEFAULT_VOICES[LANGS[args.lang]],
                 device=args.device, model_dir=args.model_dir,
                 data_dir=args.data_dir, port=args.wyoming_port,
+            )
+        elif backend == "onnx":
+            stats = synthesize_onnx(
+                text, args.lang, voice, args.speed, output,
+                threads=args.threads, data_dir=args.data_dir,
+                model_dir=args.model_dir,
             )
         else:
             stats = synthesize(text, args.lang, voice, args.speed, output, args.threads)

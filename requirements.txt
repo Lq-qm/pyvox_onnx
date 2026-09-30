@@ -1,7 +1,8 @@
 # === Instale PRIMEIRO o PyTorch CPU-only (senão baixa a build CUDA): ===
 #   uv pip install -i https://download.pytorch.org/whl/cpu torch
 #   pip  install -i https://download.pytorch.org/whl/cpu torch
-torch>=2.0+cpu
+# (pin sem `+cpu` para não quebrar o `uv pip install -r`; a build CPU vem do índice acima)
+torch>=2.0
 
 # Kokoro TTS (motor de síntese de fala)
 kokoro>=0.9.4,<1
@@ -14,6 +15,11 @@ huggingface_hub>=0.34,<0.35
 # Backend Wyoming (servidor WebSocket wyoming-kokoro-torch)
 wyoming-kokoro-torch>=3.2,<4
 wyoming>=1.7.2,<1.8
+
+# Backend ONNX (aceleração CPU via onnxruntime — roda 100% em CPU)
+kokoro-onnx>=0.4.7,<0.5
+# A wheel padrão `onnxruntime` é CPU-only (a GPU exigiria `onnxruntime-gpu`, não usado)
+onnxruntime>=1.20
 
 # Escrita de WAV
 soundfile>=0.12.0
