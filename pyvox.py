@@ -18,6 +18,9 @@ Exemplos:
 
     # Texto direto, sem arquivo
     python pyvox.py --text "Olá, mundo."
+
+    # Saída em MP3 (conversão WAV→MP3 via ffmpeg-python; wav é o padrão)
+    python pyvox.py texto.txt -f mp3 -o narracao.mp3
 """
 from __future__ import annotations
 
@@ -112,7 +115,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                    help=f"voz exata a usar (ex.: {DEFAULT_VOICES['p']} para pt-br; --narrador ou --list-voices)")
     p.add_argument("-s", "--speed", type=float, default=1.0,
                    help="velocidade da fala, 0.5 = metade, 1.5 = 1.5x (padrão: 1.0)")
-    p.add_argument("-o", "--output", help="arquivo .wav de saída (padrão: <arquivo>.wav ou narração.wav)")
+    p.add_argument("-o", "--output", help="arquivo de áudio de saída (padrão: <arquivo>.<formato> ou narração.<formato>)")
+    p.add_argument("-f", "--format", default=None, choices=["wav", "mp3"],
+                   help="formato de saída: wav (padrão) ou mp3 (conversão WAV→MP3 via ffmpeg-python; "
+                        "exige o binário ffmpeg no PATH) — uma extensão .mp3 em -o também ativa o mp3")
     p.add_argument("--threads", type=int, default=os.cpu_count(),
                    help="número de threads da CPU (padrão: todos os núcleos) — backends torch e onnx")
     p.add_argument("--max-chars", type=int, default=None,
@@ -323,6 +329,31 @@ def synthesize_onnx(
 
 
 # --------------------------------------------------------------------------- #
+# Conversão WAV → MP3
+# --------------------------------------------------------------------------- #
+def convert_wav_to_mp3(wav: str, mp3: str) -> None:
+    """Converte `wav` em `mp3` usando ffmpeg-python (binário ffmpeg no PATH)."""
+    try:
+        import ffmpeg
+    except ImportError as e:
+        raise RuntimeError(
+            "saída mp3 requer o pacote 'ffmpeg-python' (pip install ffmpeg-python)"
+        ) from e
+    try:
+        (
+            ffmpeg.input(wav)
+            .output(mp3, format="mp3", acodec="libmp3lame", ar=24000, ac=1)
+            .overwrite_output()
+            .run(quiet=True)
+        )
+    except FileNotFoundError as e:
+        raise RuntimeError(
+            "binário ffmpeg não encontrado no PATH (necessário para a saída mp3; "
+            "ex.: 'sudo apt install ffmpeg' ou 'brew install ffmpeg')"
+        ) from e
+
+
+# --------------------------------------------------------------------------- #
 # Reprodução
 # --------------------------------------------------------------------------- #
 def play(path: str) -> bool:
@@ -383,7 +414,15 @@ def main(argv: list[str] | None = None) -> int:
         print("erro: --speed deve estar entre 0.5 e 2.0 (limite do Kokoro)", file=sys.stderr)
         return 1
 
-    output = args.output or f"{base}.wav"
+    # Formato de saída: --format explícito > extensão .mp3 em -o > padrão wav
+    if args.format:
+        fmt = args.format
+    elif args.output and Path(args.output).suffix.lower() == ".mp3":
+        fmt = "mp3"
+    else:
+        fmt = "wav"
+    ext = ".mp3" if fmt == "mp3" else ".wav"
+    output = str(Path(args.output).with_suffix(ext) if args.output else Path(base + ext))
 
     # Voz: --voice (exata) > --narrador (m/f) > padrão do idioma
     lang_code = LANGS[args.lang]
@@ -413,32 +452,49 @@ def main(argv: list[str] | None = None) -> int:
             except ImportError:
                 backend = "torch"
 
+    # Todos os backends gravam WAV; se o formato for mp3, converte ao final
+    wav_path = str(Path(output).with_suffix(".wav")) if fmt == "mp3" else output
+
     try:
         if backend == "wyoming":
             stats = synthesize_wyoming(
-                text, voice, args.speed, output,
+                text, voice, args.speed, wav_path,
                 default_voice=DEFAULT_VOICES[LANGS[args.lang]],
                 device=args.device, model_dir=args.model_dir,
                 data_dir=args.data_dir, port=args.wyoming_port,
             )
         elif backend == "onnx":
             stats = synthesize_onnx(
-                text, args.lang, voice, args.speed, output,
+                text, args.lang, voice, args.speed, wav_path,
                 threads=args.threads, data_dir=args.data_dir,
                 model_dir=args.model_dir,
             )
         else:
-            stats = synthesize(text, args.lang, voice, args.speed, output, args.threads)
+            stats = synthesize(text, args.lang, voice, args.speed, wav_path, args.threads)
     except KeyboardInterrupt:
-        print("\ninterrompido. áudio parcial mantido em:", output, file=sys.stderr)
+        print("\ninterrompido. áudio parcial mantido em:", wav_path, file=sys.stderr)
         return 130
     except Exception as e:
         print(f"erro na síntese ({e.__class__.__name__}): {e}", file=sys.stderr)
         return 1
 
+    if fmt == "mp3":
+        try:
+            convert_wav_to_mp3(wav_path, output)
+            os.remove(wav_path)
+        except KeyboardInterrupt:
+            print("\ninterrompido. áudio (WAV) mantido em:", wav_path, file=sys.stderr)
+            return 130
+        except Exception as e:
+            print(f"erro na conversão WAV→MP3 ({e.__class__.__name__}): {e}", file=sys.stderr)
+            print(f"o WAV está disponível em: {wav_path}", file=sys.stderr)
+            return 1
+        stats["output"] = output
+
     print(
         f"✔ salva em {stats['output']} | "
         f"backend={stats.get('backend', 'torch')} | "
+        f"formato={fmt} | "
         f"{stats['audio_seconds']:.1f}s de áudio | "
         f"{stats['chunks']} chunks | "
         f"{stats['elapsed']:.1f}s de processamento | "

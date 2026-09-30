@@ -21,6 +21,9 @@ kokoro-onnx>=0.4.7,<0.5
 # A wheel padrão `onnxruntime` é CPU-only (a GPU exigiria `onnxruntime-gpu`, não usado)
 onnxruntime>=1.20
 
+# Saída MP3 (conversão WAV→MP3; exige também o binário ffmpeg no PATH)
+ffmpeg-python>=0.2.0
+
 # Escrita de WAV
 soundfile>=0.12.0
 numpy>=1.26

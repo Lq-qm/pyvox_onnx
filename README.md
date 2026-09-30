@@ -15,6 +15,7 @@
 - 📡 Áudio em **streaming**: chunks de ~40 ms chegam enquanto o servidor sintetiza — progresso em tempo real
 - 📥 Vozes faltantes são **baixadas automaticamente** para `./data/kokoro/`
 - 📊 Métricas ao final: tempo de áudio, nº de chunks, tempo de processamento e RTF (razão tempo real)
+- 🔊 Saída em **WAV** (padrão) ou **MP3** com `-f mp3` (conversão WAV→MP3 via `ffmpeg-python`)
 - ▶️ Reprodução do resultado com `--play` (ffplay/mpv/aplay)
 - 🎚️ Velocidade ajustável, controle de threads e `--max-chars` para testes rápidos
 - 🛡️ Erros limpos: voz inexistente, servidor com falha ou porta indisponível retornam mensagem clara (sem processos órfãos)
@@ -27,6 +28,7 @@
 | gerenciador de pacotes | `uv` (ou `pip`) |
 | disco | ~1 GB (venv) + ~330 MB (modelo torch, baixado na 1ª execução) + ~340 MB (modelo ONNX + vozes, baixados na 1ª execução do backend `onnx`) |
 | opcional (para `--play`) | `ffplay`, `mpv` ou `aplay` no `PATH` |
+| opcional (para `-f mp3`) | binário `ffmpeg` no `PATH` (ex.: `sudo apt install ffmpeg`) |
 
 ## 🚀 Instalação
 
@@ -69,6 +71,10 @@ uv pip install -r requirements.txt
 
 # Teste rápido: limita a síntese aos primeiros N caracteres
 .venv/bin/python pyvox.py meu_texto.txt --max-chars 500
+
+# Saída em MP3 (padrão é WAV; a extensão .mp3 em -o também ativa o MP3)
+.venv/bin/python pyvox.py meu_texto.txt -f mp3
+.venv/bin/python pyvox.py meu_texto.txt -o narracao.mp3 --play
 ```
 
 ### Opções
@@ -81,7 +87,8 @@ uv pip install -r requirements.txt
 | `-g, --narrador` | `m`/`masculino` (narrador) ou `f`/`feminino` (narradora) — pt-br: m=`pm_alex`, f=`pf_dora` |
 | `-v, --voice` | voz exata a usar (ex.: `pf_dora`, `pm_alex` — veja `--list-voices`) |
 | `-s, --speed` | velocidade da fala (`0.5` = metade, `1.5` = 50% mais rápido; padrão `1.0`) |
-| `-o, --output` | arquivo `.wav` de saída (padrão: `<arquivo>.wav`) |
+| `-o, --output` | arquivo de áudio de saída (padrão: `<arquivo>.<formato>` ou `narração.<formato>`) |
+| `-f, --format` | formato de saída: `wav` (padrão) ou `mp3` (conversão WAV→MP3 via `ffmpeg-python`; extensão `.mp3` em `-o` também ativa) |
 | `--backend` | `auto` (padrão), `onnx`, `torch` ou `wyoming` — veja [Backends](#-backends-de-inferência) |
 | `--device` | device do backend `wyoming`: `cpu` (padrão), `cuda`, `mps` |
 | `--model-dir` | backend `wyoming`: snapshot do Kokoro-82M (padrão: cache do Hugging Face); backend `onnx`: arquivo `.onnx` ou diretório que o contenha (padrão: baixa `kokoro-v1.0.onnx` para `./data/kokoro/`) |
@@ -111,6 +118,12 @@ $ .venv/bin/python pyvox.py meu_texto.txt --backend torch
 modelo pronto em 1.3s
 [   1]      6.1s de áudio |      1.8s cpu | “A família vivia numa cidade pequena…”
 ✔ salva em meu_texto.wav | backend=torch | 6.1s de áudio | 1 chunks | 1.8s de processamento | RTF 0.30
+
+$ .venv/bin/python pyvox.py meu_texto.txt -f mp3
+preparando backend ONNX (voz=pf_dora, pt-br, cpu)…
+modelo ONNX pronto em 0.9s
+[onnx]      6.1s de áudio |      1.5s | 1 chunks
+✔ salva em meu_texto.mp3 | backend=onnx | formato=mp3 | 6.1s de áudio | 1 chunks | 1.5s de processamento | RTF 0.24
 ```
 
 ## 🧩 Backends de inferência
@@ -198,5 +211,6 @@ Outras vozes por idioma existem — veja `--list-voices` e use `--voice`.
 - Velocidade medida (mesma máquina, 6 núcleos, ~47 s de áudio): `onnx` RTF ~0.22 < `torch` RTF ~0.24 < `wyoming` RTF ~0.68 (inclui subida do servidor); os números variam por texto/hardware.
 - A duração do áudio pode variar levemente entre backends (G2P diferente: `phonemizer-fork` no ONNX vs. `misaki` no torch; o servidor Wyoming também aplica normalização de volume e pontuação automática).
 - Textos longos em CPU podem demorar — use `--max-chars` para testar; `Ctrl+C` interrompe mantendo o áudio já gerado.
+- `-f mp3`: todos os backends gravam um WAV intermediário, que é convertido para MP3 (libmp3lame, 192 kbps, 24 kHz mono) via `ffmpeg-python` e removido ao final; `Ctrl+C` durante a conversão mantém o WAV. Exige o binário `ffmpeg` no PATH.
 - GPU: use `--backend wyoming --device cuda` (ou `mps`) quando houver uma build PyTorch compatível instalada; o setup padrão deste repositório usa PyTorch CPU (e o backend `onnx` roda sempre em CPU).
 
